@@ -145,6 +145,7 @@ Restart the MCP server afterward. Updating this repository does not automaticall
 - **First call takes a while:** the first installation downloads and extracts the backend (the macOS arm64 archive verified here was about 237 MB). Keep the tool timeout longer than the default 60 seconds.
 - **Ambiguous project directory:** pass an explicit solution or project file when the directory contains multiple candidates.
 - **Project loading fails:** check the .NET SDK, project dependencies, licensing, and backend logs under `<cache-directory>/logs/`.
+- **SDK discovery:** `RESHARPER_MCP_DOTNET` selects the SDK installation for compiling our managed host. Host SDK discovery and compilation run in the backend cache, independently of the analyzed repository's `global.json`. That repository keeps its own SDK selection for its projects. Restart the MCP connection after updating the server or its configuration.
 - **Analysis times out:** the server did not receive cache-ready/file-analysis-complete signals or background work remained active. An excluded or unsupported file may not be analyzed. A timeout is reported as an error, rather than a clean file.
 - **Investigating diagnostics:** enable `RESHARPER_MCP_TRACE=1`. In Codex, add this environment table under the server configuration and restart:
 

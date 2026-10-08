@@ -51,8 +51,10 @@ async function buildHost(executable: string): Promise<BackendLaunch> {
   try { if (await readFile(marker, 'utf8') === signature) { await access(host); return launch; } } catch { /* build on first use or source update */ }
   const dotnet = process.env.RESHARPER_MCP_DOTNET ?? 'dotnet';
   let version: string;
-  try { version = (await run(dotnet, ['--version'], { timeout: 30_000 })).stdout.trim(); }
-  catch { throw new Error('The managed host needs a .NET SDK (8 or newer) on PATH. Set RESHARPER_MCP_DOTNET to its absolute dotnet path.'); }
+  // The MCP client may start us in a repository whose global.json selects a
+  // different SDK. Compile our host independently of that project's selection.
+  try { version = (await run(dotnet, ['--version'], { cwd: root, timeout: 30_000 })).stdout.trim(); }
+  catch (error) { throw new Error(`Cannot resolve a .NET SDK for the managed host using ${dotnet}. Set RESHARPER_MCP_DOTNET to a dotnet executable with SDK 8 or newer. ${error instanceof Error ? error.message : String(error)}`); }
   const major = Number(version.split('.')[0]);
   if (!Number.isInteger(major) || major < 8) throw new Error(`The managed host needs .NET SDK 8 or newer; found ${version}`);
   const runtimes = (await run(launch.executable, ['--list-runtimes'], { timeout: 30_000 })).stdout;
@@ -67,7 +69,7 @@ async function buildHost(executable: string): Promise<BackendLaunch> {
     console.error('Building standalone ReSharper SWEA host...');
     try {
       await run(dotnet, ['build', join(stage, names[0]), '--nologo', '-v:q', '--configfile', join(stage, 'NuGet.Config'),
-        `-p:BackendRoot=${root}`, `-p:TargetFramework=net${targetMajor}.0`, '-o', output], { timeout: 180_000, maxBuffer: 4 * 1024 * 1024 });
+        `-p:BackendRoot=${root}`, `-p:TargetFramework=net${targetMajor}.0`, '-o', output], { cwd: stage, timeout: 180_000, maxBuffer: 4 * 1024 * 1024 });
     } catch (error) { throw new Error(`Cannot build SWEA host for this backend: ${error instanceof Error ? error.message : String(error)}`); }
     // Retain JetBrains' dependency map and runtime policy (including its platform
     // shims), and add our assembly without changing any distributed binary.
