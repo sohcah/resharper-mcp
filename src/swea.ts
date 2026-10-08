@@ -22,13 +22,12 @@ export function parseSweaState(line: string, previous?: SweaState): SweaState {
   const state = sweaStateSchema.parse(JSON.parse(line));
   return { ...state, issues: state.issues ?? previous?.issues ?? [] };
 }
-export interface BackendLaunch { executable: string; args: string[]; cwd: string; swea: boolean }
+export interface BackendLaunch { executable: string; args: string[]; cwd: string }
 export type ProgressListener = (message: string) => void;
 const run = promisify(execFile);
 const preparations = new Map<string, Promise<BackendLaunch>>();
 
 export function prepareBackend(executable: string): Promise<BackendLaunch> {
-  if (process.env.RESHARPER_MCP_SWEA !== '1') return Promise.resolve({ executable, args: [], cwd: dirname(executable), swea: false });
   let preparation = preparations.get(executable);
   if (!preparation) {
     preparation = buildHost(executable).catch(error => { preparations.delete(executable); throw error; });
@@ -47,15 +46,15 @@ async function buildHost(executable: string): Promise<BackendLaunch> {
   const signature = hash.digest('hex');
   const host = join(root, 'ReSharperMcpHost.dll');
   const marker = join(root, 'resharper-mcp-swea.json');
-  const launch = { executable: join(cwd, 'dotnet', process.platform === 'win32' ? 'dotnet.exe' : 'dotnet'), args: [host], cwd, swea: true };
+  const launch = { executable: join(cwd, 'dotnet', process.platform === 'win32' ? 'dotnet.exe' : 'dotnet'), args: [host], cwd };
   await access(launch.executable);
   try { if (await readFile(marker, 'utf8') === signature) { await access(host); return launch; } } catch { /* build on first use or source update */ }
   const dotnet = process.env.RESHARPER_MCP_DOTNET ?? 'dotnet';
   let version: string;
   try { version = (await run(dotnet, ['--version'], { timeout: 30_000 })).stdout.trim(); }
-  catch { throw new Error('SWEA mode needs a .NET SDK (8 or newer) on PATH. Set RESHARPER_MCP_DOTNET to its absolute dotnet path.'); }
+  catch { throw new Error('The managed host needs a .NET SDK (8 or newer) on PATH. Set RESHARPER_MCP_DOTNET to its absolute dotnet path.'); }
   const major = Number(version.split('.')[0]);
-  if (!Number.isInteger(major) || major < 8) throw new Error(`SWEA mode needs .NET SDK 8 or newer; found ${version}`);
+  if (!Number.isInteger(major) || major < 8) throw new Error(`The managed host needs .NET SDK 8 or newer; found ${version}`);
   const runtimes = (await run(launch.executable, ['--list-runtimes'], { timeout: 30_000 })).stdout;
   const runtimeMajors = [...runtimes.matchAll(/Microsoft\.NETCore\.App (\d+)\./g)].map(match => Number(match[1]));
   if (!runtimeMajors.length) throw new Error('The downloaded backend contains no usable .NET runtime.');

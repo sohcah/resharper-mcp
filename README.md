@@ -7,7 +7,7 @@ A stateful TypeScript MCP server that runs the language server used by JetBrains
 Prerequisites:
 
 - **Node.js 22 or later** and npm.
-- A **.NET SDK** compatible with the projects you want to analyze, available on `PATH`. ReSharper supplies its own backend runtime.
+- A **.NET SDK** compatible with your projects and the bundled backend (8 or newer; tested with .NET 10), available on `PATH`. It also compiles our managed host on first use. ReSharper supplies its own backend runtime.
 - Network access to Open VSX and JetBrains' download CDN for the first installation.
 - ReSharper licensing configured through the official extension where required (see below).
 
@@ -36,7 +36,7 @@ tool_timeout_sec = 1800
 
 If Codex cannot find Node, use the absolute path to the Node executable for `command`. Run `node -p 'process.execPath'` in your terminal to find it. Node and your .NET SDK must be accessible in the environment that launches the server; desktop apps may have a different `PATH` from your shell.
 
-The longer tool timeout allows for the first backend download and project loading. MCP startup itself responds while the download runs. Backend operations have five-minute timeouts by default; SWEA mode allows 30 minutes.
+The longer tool timeout allows for the first backend download and project loading. MCP startup itself responds while the download runs. Backend operations allow up to 30 minutes for loading and solution-wide analysis.
 
 Restart Codex after changing the configuration. In the Codex CLI, use `/mcp` to confirm that `resharper` is connected. You can also inspect the saved configuration:
 
@@ -48,34 +48,34 @@ Then ask Codex:
 
 > Use ReSharper to read lint for `/work/MyApp/src/MyApp/Program.cs` in `/work/MyApp/MyApp.slnx`.
 
-`read_lint` loads the project automatically, so you do not need to call `load_project` first. `load_project`, `close_project`, and `get_project_status` manage and inspect the live session. The optional SWEA mode adds `read_solution_lint`.
+`read_lint` loads the project automatically, so you do not need to call `load_project` first. `load_project`, `close_project`, and `get_project_status` manage and inspect the live session. `read_solution_lint` returns solution-wide errors and warnings from the same session.
 
 Codex also supports project-scoped configuration in `.codex/config.toml` for trusted projects. See the [official Codex MCP documentation](https://developers.openai.com/codex/mcp/) for configuration and timeout options.
 
 ## Continuous solution-wide analysis (experimental)
 
-Enable **SWEA** to keep errors and warnings updated across the solution, including unopened files. This runs independently of Rider or Visual Studio. Add this environment table to the MCP configuration above:
+**SWEA runs by default**, keeping errors and warnings updated across the solution, including unopened files. It runs independently of Rider or Visual Studio; no opt-in setting is required.
+
+If your desktop app cannot find the .NET SDK, set its absolute path:
 
 ```toml
 [mcp_servers.resharper.env]
-RESHARPER_MCP_SWEA = "1"
-# Optional if your desktop app cannot find the .NET SDK:
-# RESHARPER_MCP_DOTNET = "/absolute/path/to/dotnet"
+RESHARPER_MCP_DOTNET = "/absolute/path/to/dotnet"
 ```
 
-Then rebuild (`npm run build`) and restart the MCP server. A compatible .NET SDK (**8 or newer; tested with .NET 10**) is needed to compile the small managed host on first use; builds are cached and need no additional NuGet downloads. The SDK must provide reference assemblies compatible with the downloaded backend runtime. Keep `backend-host/` beside `dist/` when moving the installation. The backend must be writable so our host can be added alongside its assemblies. JetBrains' existing executables and assemblies are retained unchanged.
+A compatible .NET SDK (**8 or newer; tested with .NET 10**) is needed to compile the small managed host on first use; builds are cached and need no additional NuGet downloads. The SDK must provide reference assemblies compatible with the downloaded backend runtime. Keep `backend-host/` beside `dist/` when moving the installation. The backend must be writable so our host can be added alongside its assemblies. JetBrains' existing executables and assemblies are retained unchanged.
 
 The host loads the bundled SWEA engine, enables its live session and warning analysis, and publishes real pending-file counts, pause reasons, completion, and solution issues. Initial analysis is followed by incremental updates. Saved changes under the solution/project directory are watched automatically, including synchronization of documents opened through `read_lint`. Unsaved editor buffers are not synchronized. C# and VB are the SWEA languages documented by JetBrains.
 
 - `read_solution_lint({ project })` loads/reuses the session and waits for SWEA to complete before returning its current solution-wide errors and warnings.
 - `get_project_status({ project })` returns immediately with loading state and the latest analysis snapshot. It never starts a project. During SWEA it includes `pendingFiles`, `totalFiles`, `completed`, `paused`, and `issues`.
 - While `completed` is false, `issues` retains the last completed snapshot and may be stale. `read_solution_lint` waits for a fresh completed snapshot.
-- `load_project` and `read_lint` also wait for SWEA completion in this mode. SWEA operations allow up to 30 minutes rather than the default five minutes.
+- `load_project` and `read_lint` also wait for SWEA completion. Backend operations allow up to 30 minutes.
 - Load/read calls send MCP `notifications/progress` when the caller supplies a progress token. Clients decide how to display them. Progress messages include the backend's loading tasks and SWEA counts; notification numbers are monotonically increasing event counts, not percentages. Between calls, the backend continues analyzing; query `get_project_status` for its latest state.
 
 Solution issues contain `file`, `message`, textual `severity`, and nullable `startOffset`/`endOffset` measured in UTF-16 code units from the start of the file. This is the SWEA errors/warnings collection, not every suggestion and hint from per-file inspection. Use `read_lint` for the full LSP diagnostic list of a file.
 
-This mode uses backend component APIs that JetBrains does not document as a standalone VS Code extension contract. It is **experimental**, verified with backend **2026.2.3 on macOS arm64**. A future backend may require host changes; host compilation or missing completion signals produce an error, never a clean result. The server still uses JetBrains' normal host and licensing mechanisms. See [research and verification notes](docs/research/continuous-swea-official-sources.md).
+The host uses backend component APIs that JetBrains does not document as a standalone VS Code extension contract. It is **experimental**, verified with backend **2026.2.3 on macOS arm64**. A future backend may require host changes; host compilation or missing completion signals produce an error, never a clean result. The server still uses JetBrains' normal host and licensing mechanisms. See [research and verification notes](docs/research/continuous-swea-official-sources.md).
 
 ## First boot and backend updates
 
@@ -106,7 +106,7 @@ Keep the MCP process running to preserve sessions. Each process owns its session
 - `read_lint({ project, file })`: automatically load/reuse the project, open the saved file, focus it for analysis, wait for cache readiness and that file's daemon to finish, then collect the final `textDocument/publishDiagnostics` updates. Documents remain open in the session; subsequent reads synchronize changed saved contents with `textDocument/didChange`. `file` can be absolute or relative to the solution/project directory and must lie inside that directory. Initially accepts `.cs`, `.razor`, `.cshtml`, `.xaml`, `.vb`, and `.fs`; actual language support depends on ReSharper. C# has been verified against the real backend.
 - `close_project({ project })`: close the solution and shut down its backend process. Repeated closes are safe.
 - `get_project_status({ project })`: inspect an existing session without waiting for loading or analysis; includes live SWEA state when enabled.
-- `read_solution_lint({ project })`: read the completed SWEA errors/warnings snapshot. Requires `RESHARPER_MCP_SWEA=1`; see above for its output format.
+- `read_solution_lint({ project })`: read the completed SWEA errors/warnings snapshot. See above for its output format.
 
 Example `read_lint` arguments:
 
@@ -123,8 +123,7 @@ Each project gets a separate backend, reused across calls. Concurrent loads shar
 - `RESHARPER_MCP_CACHE_DIR`: installation and log directory; default `~/.cache/resharper-mcp`.
 - `RESHARPER_MCP_TRACE=1`: log incoming cache, daemon, and diagnostic notifications to stderr for troubleshooting (includes file paths and diagnostic messages).
 - `RESHARPER_MCP_BACKEND`: absolute path to an existing platform launcher, such as `backend/macos-arm64/JetBrains.VsCode.Backend`. Skips downloads. Keep its original backend directory structure intact.
-- `RESHARPER_MCP_SWEA=1`: enable the experimental standalone continuous SWEA host and saved-file watching.
-- `RESHARPER_MCP_DOTNET`: path to the .NET SDK's `dotnet` executable used to compile the SWEA host. Defaults to `dotnet` on `PATH`; execution uses the downloaded backend runtime.
+- `RESHARPER_MCP_DOTNET`: path to the .NET SDK's `dotnet` executable used to compile the managed host. Defaults to `dotnet` on `PATH`; execution uses the downloaded backend runtime.
 
 ## Development
 
@@ -169,6 +168,6 @@ SWEA tests cover waiting for global completion and pending files, saved-file syn
 
 Verified on macOS arm64 with Open VSX extension **2026.2.3**: full installation/checksums, project loading, and C# diagnostics. Windows/Linux launchers and other source languages have not been exercised here.
 
-ReSharper's extension-specific protocol is not a documented stable standalone API. The implementation follows the distributed extension's launcher and solution lifecycle. Default-mode projects and file analysis have five-minute timeouts; SWEA mode allows 30 minutes. The server requires `resharper/caches/stateChanged` to report caches ready and `resharper/daemon/stateChanged` to report the target file up to date. These signals are provided by the verified 2026.2.3 backend. It also tracks the status-bar notification `resharper/backgroundTasks/didChangeStatus`, ReSharper `progressIndicator` start/stop notifications, and standard LSP work-done progress. Loading waits for ready caches and idle reported work. Diagnostics additionally require the target file's daemon to be idle for the current open/change. A completed clean analysis may publish no report at all. After those conditions are met, **two quiet seconds** drain the backend's delayed diagnostic publisher. Cached or empty reports alone never establish completion. If readiness/completion signals do not arrive, the call returns a timeout error rather than treating the file as clean. Older backends without these notifications are not supported. Default mode refreshes saved content when `read_lint` is called. SWEA mode watches saved changes automatically. Neither mode synchronizes unsaved editor buffers or restores/builds projects itself.
+ReSharper's extension-specific protocol is not a documented stable standalone API. The implementation follows the distributed extension's launcher and solution lifecycle. Projects and file analysis have 30-minute timeouts and require SWEA completion. The server requires `resharper/caches/stateChanged` to report caches ready and `resharper/daemon/stateChanged` to report the target file up to date. These signals are provided by the verified 2026.2.3 backend. It also tracks the status-bar notification `resharper/backgroundTasks/didChangeStatus`, ReSharper `progressIndicator` start/stop notifications, and standard LSP work-done progress. Loading waits for ready caches and idle reported work. Diagnostics additionally require the target file's daemon to be idle for the current open/change. A completed clean analysis may publish no report at all. After those conditions are met, **two quiet seconds** drain the backend's delayed diagnostic publisher. Cached or empty reports alone never establish completion. If readiness/completion signals do not arrive, the call returns a timeout error rather than treating the file as clean. Older backends without these notifications are not supported. The server watches saved changes automatically. It does not synchronize unsaved editor buffers or restore/build projects itself.
 
 References: [Open VSX extension](https://open-vsx.org/extension/JetBrains/resharper-code), [JetBrains ReSharper for VS Code](https://www.jetbrains.com/resharper/vscode/), [LSP specification](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/), [MCP server guide](https://modelcontextprotocol.io/docs/develop/build-server).

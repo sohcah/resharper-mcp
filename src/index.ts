@@ -34,7 +34,7 @@ server.registerTool('read_lint', {
   annotations: { readOnlyHint: true, destructiveHint: false },
 }, (args, extra) => result(() => projects.diagnostics(args.project, args.file, progress(extra))));
 server.registerTool('read_solution_lint', {
-  description: 'Wait for continuous solution-wide analysis and read its current errors and warnings, including unopened files. Requires RESHARPER_MCP_SWEA=1. Issue offsets are zero-based UTF-16 offsets from the start of the saved file.',
+  description: 'Wait for continuous solution-wide analysis and read its current errors and warnings, including unopened files. Issue offsets are zero-based UTF-16 offsets from the start of the saved file.',
   inputSchema: { project }, annotations: { readOnlyHint: true, destructiveHint: false },
 }, (args, extra) => result(() => projects.solutionDiagnostics(args.project, progress(extra))));
 server.registerTool('get_project_status', {

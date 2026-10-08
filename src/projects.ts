@@ -29,7 +29,7 @@ export class ProjectManager {
       const launch = await prepareBackend(executable);
       const logs = join(cacheDirectory, 'logs', basename(project));
       await mkdir(logs, { recursive: true });
-      return new ReSharperSession(executable, project, launch.swea ? 1_800_000 : 300_000, logs, launch, onProgress);
+      return new ReSharperSession(launch, project, 1_800_000, logs, onProgress);
     },
     private readonly idleMs = 30 * 60_000,
     private readonly now = Date.now,
@@ -85,7 +85,6 @@ export class ProjectManager {
     return this.use(project, async session => ({ project, file, diagnostics: await session.diagnostics(file) }), onProgress);
   }
   async solutionDiagnostics(input: string, onProgress?: ProgressListener) {
-    if (process.env.RESHARPER_MCP_SWEA !== '1') throw new Error('Solution-wide diagnostics require RESHARPER_MCP_SWEA=1.');
     const project = await projectPath(input);
     return this.use(project, async session => {
       if (!session.solutionDiagnostics) throw new Error('Solution-wide diagnostics are not available for this backend.');

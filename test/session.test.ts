@@ -9,7 +9,7 @@ test('LSP waits for registration, didOpen, and settled diagnostics; rereads save
   const root = await mkdtemp(join(tmpdir(), 'resharper-lsp-'));
   const project = join(root, 'App.csproj'), file = join(root, 'A.cs');
   await writeFile(project, ''); await writeFile(file, 'broken');
-  const session = new ReSharperSession(resolve('test/fake-backend.mjs'), project, 8000, root);
+  const session = new ReSharperSession({ executable: resolve('test/fake-backend.mjs'), args: [], cwd: root }, project, 8000, root);
   try {
     await session.start();
     const started = Date.now();
@@ -26,7 +26,7 @@ test('unfinished background work times out instead of returning an empty report'
   const root = await mkdtemp(join(tmpdir(), 'resharper-lsp-'));
   const project = join(root, 'App.csproj'), file = join(root, 'A.cs');
   await writeFile(project, ''); await writeFile(file, 'stuck');
-  const session = new ReSharperSession(resolve('test/fake-backend.mjs'), project, 2500, root);
+  const session = new ReSharperSession({ executable: resolve('test/fake-backend.mjs'), args: [], cwd: root }, project, 2500, root);
   try {
     await session.start();
     await assert.rejects(session.diagnostics(file), /ReSharper analysis did not finish/);
@@ -37,7 +37,7 @@ test('cached empty diagnostics cannot complete a read before delayed per-file an
   const root = await mkdtemp(join(tmpdir(), 'resharper-lsp-'));
   const project = join(root, 'App.csproj'), file = join(root, 'A.cs');
   await writeFile(project, ''); await writeFile(file, 'late broken');
-  const session = new ReSharperSession(resolve('test/fake-backend.mjs'), project, 8000, root);
+  const session = new ReSharperSession({ executable: resolve('test/fake-backend.mjs'), args: [], cwd: root }, project, 8000, root);
   try {
     await session.start();
     let started = Date.now();
@@ -55,16 +55,16 @@ test('cached empty diagnostics cannot complete a read before delayed per-file an
 test('SWEA waits for global completion and watches changed open files between calls', async () => {
   const root = await mkdtemp(join(tmpdir(), 'resharper-swea-'));
   const project = join(root, 'App.csproj'), file = join(root, 'A.cs');
-  await writeFile(project, ''); await writeFile(file, 'fixed');
+  await writeFile(project, ''); await writeFile(file, 'swea delayed');
   const executable = resolve('test/fake-backend.mjs');
   const progress: string[] = [];
-  const session = new ReSharperSession(executable, project, 8000, root, { executable, args: ['--fake-swea'], cwd: root, swea: true }, message => progress.push(message));
+  const session = new ReSharperSession({ executable, args: [], cwd: root }, project, 8000, root, message => progress.push(message));
   try {
     await session.start();
     const started = Date.now();
     assert.deepEqual(await session.diagnostics(file), []);
     assert.ok(Date.now() - started >= 5000, 'File daemon completion cannot bypass pending SWEA work');
-    await writeFile(file, 'broken');
+    await writeFile(file, 'swea delayed broken');
     const deadline = Date.now() + 2000;
     while ((session.status().swea?.completed ?? true) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
     const state = await session.solutionDiagnostics();

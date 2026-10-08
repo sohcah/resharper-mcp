@@ -42,13 +42,12 @@ export class ReSharperSession implements ProjectSession {
   private swea?: SweaState;
   private watcher?: FSWatcher;
   private watchTail: Promise<void> = Promise.resolve();
-  constructor(private readonly executable: string, readonly project: string, private readonly waitMs = 300_000, private readonly logDirectory = dirname(project), private readonly launch?: BackendLaunch, private readonly onProgress?: ProgressListener) {}
+  constructor(private readonly launch: BackendLaunch, readonly project: string, private readonly waitMs = 1_800_000, private readonly logDirectory = dirname(project), private readonly onProgress?: ProgressListener) {}
 
   status() {
     return { cachesReady: this.cachesReady, backgroundTasks: this.backgroundTaskCount, swea: this.swea ?? null, watchingFiles: !!this.watcher, error: this.failure?.message ?? null };
   }
   async solutionDiagnostics(): Promise<SweaState> {
-    if (!this.launch?.swea) throw new Error('Solution-wide diagnostics require RESHARPER_MCP_SWEA=1.');
     await this.watchTail;
     await this.waitUntilIdle();
     return this.swea!;
@@ -80,8 +79,8 @@ export class ReSharperSession implements ProjectSession {
     const port = (server.address() as { port: number }).port;
     try {
       this.onProgress?.('Starting ReSharper backend');
-      this.child = spawn(this.launch?.executable ?? this.executable, [...(this.launch?.args ?? []), `--socket=${port}`, `--ParentPid=${process.pid}`, '--ClientName=VSCode', '--IsRemDev=false', `--LogFolder=${this.logDirectory}`], { cwd: this.launch?.cwd ?? dirname(this.executable), stdio: ['ignore', 'pipe', 'pipe'] });
-      if (this.launch?.swea && this.child.stdout) {
+      this.child = spawn(this.launch.executable, [...this.launch.args, `--socket=${port}`, `--ParentPid=${process.pid}`, '--ClientName=VSCode', '--IsRemDev=false', `--LogFolder=${this.logDirectory}`], { cwd: this.launch.cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+      if (this.child.stdout) {
         const lines = createInterface({ input: this.child.stdout });
         lines.on('line', line => {
           if (!line.startsWith('RESHARPER_MCP_SWEA:')) { console.error(line); return; }
@@ -91,7 +90,7 @@ export class ReSharperSession implements ProjectSession {
             this.events.emit('activity');
           } catch (error) { this.fail(new Error(`Invalid SWEA host output: ${error instanceof Error ? error.message : String(error)}`)); }
         });
-      } else this.child.stdout?.on('data', chunk => process.stderr.write(chunk));
+      }
       this.child.stderr?.on('data', chunk => process.stderr.write(chunk));
       const failed = this.waitFor<never>('never');
       this.child.on('error', error => this.fail(error));
@@ -179,7 +178,7 @@ export class ReSharperSession implements ProjectSession {
           timeout(loaded.promise, this.waitMs, 'Project loading'),
         ]);
       } finally { loaded.dispose(); }
-      if (this.launch?.swea) this.watchFiles();
+      this.watchFiles();
       await this.waitUntilIdle();
     } catch (error) { await this.close(); throw error; }
     finally { server.close(); }
@@ -254,14 +253,14 @@ export class ReSharperSession implements ProjectSession {
       const update = () => {
         clearTimeout(quiet);
         if (!this.cachesReady || this.backgroundTaskCount || this.progressIndicators.size || this.workDoneTokens.size) return;
-        if (this.launch?.swea && (!this.swea?.enabled || !this.swea.loaded || !this.swea.completed || this.swea.paused || this.swea.pendingFiles)) return;
+        if (!this.swea?.enabled || !this.swea.loaded || !this.swea.completed || this.swea.paused || this.swea.pendingFiles) return;
         if (uri && !this.daemonIdle.get(uri)) return;
         // The daemon reports UP_TO_DATE before the diagnostics publisher's
         // 200 ms grouping event finishes. Drain those final notifications.
         quiet = setTimeout(() => { cleanup(); resolve(); }, 2_000);
       };
       const failed = (error: Error) => { cleanup(); reject(error); };
-      const deadline = setTimeout(() => failed(new Error('ReSharper analysis did not finish: waiting for caches ready, file daemon idle, background work, and (when enabled) SWEA completion. The backend must support resharper/caches/stateChanged and resharper/daemon/stateChanged.')), this.waitMs);
+      const deadline = setTimeout(() => failed(new Error('ReSharper analysis did not finish: waiting for caches ready, file daemon idle, background work, and SWEA completion. The backend must support resharper/caches/stateChanged and resharper/daemon/stateChanged.')), this.waitMs);
       if (uri) { this.events.on(uri, update); this.events.on(`daemon:${uri}`, update); }
       this.events.on('activity', update); this.events.once('failure', failed); update();
     });

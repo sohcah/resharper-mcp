@@ -4,7 +4,6 @@ import { createMessageConnection, StreamMessageReader, StreamMessageWriter } fro
 const port = Number(process.argv.find(arg => arg.startsWith('--socket=')).split('=')[1]);
 const socket = connect(port, '127.0.0.1');
 const rpc = createMessageConnection(new StreamMessageReader(socket), new StreamMessageWriter(socket));
-const swea = process.argv.includes('--fake-swea');
 const sweaState = (overrides = {}) => console.log('RESHARPER_MCP_SWEA:' + JSON.stringify({ enabled: true, loaded: true, completed: true, paused: false, pauseReason: '', pendingFiles: 0, totalFiles: 2, issues: [], ...overrides }));
 rpc.onRequest('initialize', () => ({ capabilities: { positionEncoding: 'utf-16' } }));
 rpc.onNotification('initialized', () => {
@@ -15,16 +14,19 @@ rpc.onNotification('initialized', () => {
 rpc.onRequest('resharper/solution/open', async () => {
   await rpc.sendNotification('resharper/solution/didOpen', {});
   await rpc.sendNotification('resharper/caches/stateChanged', { isReady: true });
-  if (swea) sweaState();
+  sweaState();
   setTimeout(() => { void rpc.sendRequest('client/registerCapability', { registrations: [{ method: 'textDocument/didOpen' }, { method: 'textDocument/didChange' }] }); }, 50);
   return null;
 });
 const analyze = async (textDocument) => {
-  if (swea) {
+  if (textDocument.text.includes('swea delayed')) {
     sweaState({ completed: false, pendingFiles: 2 });
     // Even a premature completed flag must not ignore remaining pending files.
     setTimeout(() => sweaState({ pendingFiles: 1 }), 600);
     setTimeout(() => sweaState({ issues: textDocument.text.includes('broken') ? [{ file: '/B.cs', message: 'Dependent error', severity: 'ERROR', startOffset: 0, endOffset: 1 }] : [] }), 3100);
+  } else {
+    sweaState({ completed: false, pendingFiles: 1 });
+    setTimeout(() => sweaState(), 150);
   }
   const late = textDocument.text.includes('late');
   const stuck = textDocument.text.includes('stuck');
