@@ -66,6 +66,30 @@ test('platform mapping and archive traversal protection', () => {
   for (const name of ['../escape', '/escape', 'C:/escape', '..\\escape']) assert.throws(() => archivePath('/tmp/root', name));
   assert.equal(archivePath('/tmp/root', 'extension/package.json'), '/tmp/root/extension/package.json');
 });
+
+test('live status stays observable while startup is pending and does not load a closed project', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'resharper-status-'));
+  await writeFile(join(root, 'App.csproj'), '');
+  let release!: () => void, starts = 0;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  const progress: string[] = [];
+  const manager = new ProjectManager(async (_project, onProgress) => ({
+    async start() { starts++; onProgress('Analyzing'); await blocked; },
+    async close() {}, async diagnostics() { return []; }, status() { return { pending: 3 }; },
+  }));
+  try {
+    assert.equal((await manager.status(root)).loaded, false);
+    assert.equal(starts, 0);
+    const loading = manager.load(root, message => progress.push(message));
+    while (!starts) await new Promise(resolve => setTimeout(resolve, 5));
+    const status = await manager.status(root);
+    assert.equal(status.loading, true);
+    assert.equal((status as { pending?: number }).pending, 3);
+    release(); await loading;
+    assert.equal((await manager.status(root)).loaded, true);
+    assert.deepEqual(progress, ['Analyzing']);
+  } finally { release(); await manager.shutdown(); await rm(root, { recursive: true, force: true }); }
+});
 test('ZIP extraction preserves content and executable permissions', async () => {
   const root = await mkdtemp(join(tmpdir(), 'resharper-zip-'));
   try {

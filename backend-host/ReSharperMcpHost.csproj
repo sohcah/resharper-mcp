@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>ReSharperMcpHost</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Program.cs" />
+    <Compile Include="SweaBridge.cs" />
+    <Reference Include="$(BackendRoot)/JetBrains.*.dll"><Private>false</Private></Reference>
+    <Reference Include="$(BackendRoot)/JetBrains.VsCode.Backend.exe"><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

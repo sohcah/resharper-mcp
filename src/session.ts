@@ -1,11 +1,14 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
+import { watch, type FSWatcher } from 'node:fs';
+import { createInterface } from 'node:readline';
 import { createServer, type Socket } from 'node:net';
-import { dirname, basename, extname } from 'node:path';
+import { dirname, basename, extname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createMessageConnection, StreamMessageReader, StreamMessageWriter, CancellationTokenSource, type MessageConnection } from 'vscode-jsonrpc/node.js';
 import type { Diagnostic, InitializeResult, PublishDiagnosticsParams } from 'vscode-languageserver-protocol';
+import { parseSweaState, type BackendLaunch, type ProgressListener, type SweaState } from './swea.js';
 
 export function timeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -17,6 +20,8 @@ export interface ProjectSession {
   start(): Promise<void>;
   diagnostics(file: string): Promise<Diagnostic[]>;
   close(): Promise<void>;
+  status?(): unknown;
+  solutionDiagnostics?(): Promise<SweaState>;
 }
 export class ReSharperSession implements ProjectSession {
   private child?: ChildProcess;
@@ -34,7 +39,20 @@ export class ReSharperSession implements ProjectSession {
   private readonly progressIndicators = new Set<string | number>();
   private readonly workDoneTokens = new Set<string | number>();
   private readonly registeredMethods = new Set<string>();
-  constructor(private readonly executable: string, readonly project: string, private readonly waitMs = 300_000, private readonly logDirectory = dirname(project)) {}
+  private swea?: SweaState;
+  private watcher?: FSWatcher;
+  private watchTail: Promise<void> = Promise.resolve();
+  constructor(private readonly executable: string, readonly project: string, private readonly waitMs = 300_000, private readonly logDirectory = dirname(project), private readonly launch?: BackendLaunch, private readonly onProgress?: ProgressListener) {}
+
+  status() {
+    return { cachesReady: this.cachesReady, backgroundTasks: this.backgroundTaskCount, swea: this.swea ?? null, watchingFiles: !!this.watcher, error: this.failure?.message ?? null };
+  }
+  async solutionDiagnostics(): Promise<SweaState> {
+    if (!this.launch?.swea) throw new Error('Solution-wide diagnostics require RESHARPER_MCP_SWEA=1.');
+    await this.watchTail;
+    await this.waitUntilIdle();
+    return this.swea!;
+  }
 
   private waitFor<T>(event: string): { promise: Promise<T>; dispose: () => void } {
     let listener: (value: T) => void;
@@ -61,8 +79,19 @@ export class ReSharperSession implements ProjectSession {
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
     const port = (server.address() as { port: number }).port;
     try {
-      this.child = spawn(this.executable, [`--socket=${port}`, `--ParentPid=${process.pid}`, '--ClientName=VSCode', '--IsRemDev=false', `--LogFolder=${this.logDirectory}`], { cwd: dirname(this.executable), stdio: ['ignore', 'pipe', 'pipe'] });
-      this.child.stdout?.on('data', chunk => process.stderr.write(chunk));
+      this.onProgress?.('Starting ReSharper backend');
+      this.child = spawn(this.launch?.executable ?? this.executable, [...(this.launch?.args ?? []), `--socket=${port}`, `--ParentPid=${process.pid}`, '--ClientName=VSCode', '--IsRemDev=false', `--LogFolder=${this.logDirectory}`], { cwd: this.launch?.cwd ?? dirname(this.executable), stdio: ['ignore', 'pipe', 'pipe'] });
+      if (this.launch?.swea && this.child.stdout) {
+        const lines = createInterface({ input: this.child.stdout });
+        lines.on('line', line => {
+          if (!line.startsWith('RESHARPER_MCP_SWEA:')) { console.error(line); return; }
+          try {
+            this.swea = parseSweaState(line.slice('RESHARPER_MCP_SWEA:'.length), this.swea);
+            this.onProgress?.(this.swea.completed ? 'Solution-wide analysis complete' : `SWEA: ${this.swea.pendingFiles} of ${this.swea.totalFiles} files pending${this.swea.paused ? ` (paused: ${this.swea.pauseReason})` : ''}`);
+            this.events.emit('activity');
+          } catch (error) { this.fail(new Error(`Invalid SWEA host output: ${error instanceof Error ? error.message : String(error)}`)); }
+        });
+      } else this.child.stdout?.on('data', chunk => process.stderr.write(chunk));
       this.child.stderr?.on('data', chunk => process.stderr.write(chunk));
       const failed = this.waitFor<never>('never');
       this.child.on('error', error => this.fail(error));
@@ -89,6 +118,7 @@ export class ReSharperSession implements ProjectSession {
       // This snapshot drives the ReSharper status-bar indicator in VS Code.
       this.connection.onNotification('resharper/backgroundTasks/didChangeStatus', (params: { taskProgresses: { title: string; progress: number | null }[] }) => {
         this.backgroundTaskCount = params.taskProgresses.length;
+        for (const task of params.taskProgresses) this.onProgress?.(`${task.title}${task.progress == null ? '' : ` (${task.progress})`}`);
         this.events.emit('activity');
       });
       this.connection.onNotification('resharper/progressIndicator/start', (params: { id: string | number }) => {
@@ -149,6 +179,7 @@ export class ReSharperSession implements ProjectSession {
           timeout(loaded.promise, this.waitMs, 'Project loading'),
         ]);
       } finally { loaded.dispose(); }
+      if (this.launch?.swea) this.watchFiles();
       await this.waitUntilIdle();
     } catch (error) { await this.close(); throw error; }
     finally { server.close(); }
@@ -160,9 +191,16 @@ export class ReSharperSession implements ProjectSession {
       try { await timeout(ready.promise, this.waitMs, 'Document synchronization registration'); } finally { ready.dispose(); }
     }
     const uri = pathToFileURL(file).href;
+    await this.watchTail;
     const text = await readFile(file, 'utf8');
     const languageId = ({ '.cs': 'csharp', '.razor': 'aspnetcorerazor', '.cshtml': 'aspnetcorerazor', '.xaml': 'xaml', '.vb': 'vb', '.fs': 'fsharp' } as Record<string, string>)[extname(file).toLowerCase()];
     if (!languageId) throw new Error(`Unsupported source file type: ${extname(file)}`);
+    await this.synchronizeDocument(uri, text, languageId);
+    await this.connection!.sendNotification('resharper/textDocument/didFocus', { textDocument: { uri } });
+    await this.waitUntilIdle(uri);
+    return this.reports.get(uri)?.diagnostics ?? [];
+  }
+  private async synchronizeDocument(uri: string, text: string, languageId?: string): Promise<void> {
     const previous = this.documents.get(uri);
     if (!previous || previous.text !== text) {
       const document = { text, version: (previous?.version ?? 0) + 1 };
@@ -171,6 +209,7 @@ export class ReSharperSession implements ProjectSession {
       // A fresh analysis-completion event must follow this open/change. Neither
       // cached diagnostics nor a previous daemon's idle state prove completion.
       this.daemonIdle.delete(uri);
+      if (this.swea) this.swea = { ...this.swea, completed: false };
       if (previous) {
         await this.connection!.sendNotification('textDocument/didChange', {
           textDocument: { uri, version: document.version }, contentChanges: [{ text }],
@@ -179,9 +218,29 @@ export class ReSharperSession implements ProjectSession {
         await this.connection!.sendNotification('textDocument/didOpen', { textDocument: { uri, languageId, ...document } });
       }
     }
-    await this.connection!.sendNotification('resharper/textDocument/didFocus', { textDocument: { uri } });
-    await this.waitUntilIdle(uri);
-    return this.reports.get(uri)?.diagnostics ?? [];
+  }
+  private watchFiles() {
+    this.watcher = watch(dirname(this.project), { recursive: true }, (event, filename) => {
+      if (this.closed || !filename || /(^|[/\\])(bin|obj|\.git|node_modules)([/\\]|$)/.test(filename)) return;
+      if (!/\.(cs|vb|csproj|vbproj|sln|slnx|slnf|DotSettings|editorconfig)$/i.test(filename) && basename(filename) !== '.editorconfig') return;
+      const uri = pathToFileURL(join(dirname(this.project), filename)).href;
+      if (this.swea) this.swea = { ...this.swea, completed: false };
+      this.events.emit('activity');
+      this.watchTail = this.watchTail.then(async () => {
+        if (this.closed) return;
+        let text: string | undefined;
+        try { text = await readFile(join(dirname(this.project), filename), 'utf8'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        if (this.documents.has(uri)) {
+          if (text !== undefined) await this.synchronizeDocument(uri, text);
+          else {
+            await this.connection!.sendNotification('textDocument/didClose', { textDocument: { uri } });
+            this.documents.delete(uri); this.reports.delete(uri); this.daemonIdle.delete(uri);
+          }
+        }
+        await this.connection!.sendNotification('workspace/didChangeWatchedFiles', { changes: [{ uri, type: text === undefined ? 3 : event === 'rename' ? 1 : 2 }] });
+      }).catch(error => { if (!this.closed) this.fail(error instanceof Error ? error : new Error(String(error))); });
+    });
+    this.watcher.on('error', error => this.fail(error));
   }
   private async waitUntilIdle(uri?: string): Promise<void> {
     if (this.failure) throw this.failure;
@@ -195,13 +254,14 @@ export class ReSharperSession implements ProjectSession {
       const update = () => {
         clearTimeout(quiet);
         if (!this.cachesReady || this.backgroundTaskCount || this.progressIndicators.size || this.workDoneTokens.size) return;
+        if (this.launch?.swea && (!this.swea?.enabled || !this.swea.loaded || !this.swea.completed || this.swea.paused || this.swea.pendingFiles)) return;
         if (uri && !this.daemonIdle.get(uri)) return;
         // The daemon reports UP_TO_DATE before the diagnostics publisher's
         // 200 ms grouping event finishes. Drain those final notifications.
         quiet = setTimeout(() => { cleanup(); resolve(); }, 2_000);
       };
       const failed = (error: Error) => { cleanup(); reject(error); };
-      const deadline = setTimeout(() => failed(new Error('ReSharper analysis did not finish: waiting for caches ready, file daemon idle, and background work to settle. The backend must support resharper/caches/stateChanged and resharper/daemon/stateChanged.')), this.waitMs);
+      const deadline = setTimeout(() => failed(new Error('ReSharper analysis did not finish: waiting for caches ready, file daemon idle, background work, and (when enabled) SWEA completion. The backend must support resharper/caches/stateChanged and resharper/daemon/stateChanged.')), this.waitMs);
       if (uri) { this.events.on(uri, update); this.events.on(`daemon:${uri}`, update); }
       this.events.on('activity', update); this.events.once('failure', failed); update();
     });
@@ -209,6 +269,7 @@ export class ReSharperSession implements ProjectSession {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.watcher?.close(); this.watcher = undefined;
     this.fail(new Error('Project session closed'));
     if (this.connection) {
       try {

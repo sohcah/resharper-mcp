@@ -51,3 +51,25 @@ test('cached empty diagnostics cannot complete a read before delayed per-file an
     assert.deepEqual(await session.diagnostics(file), []);
   } finally { await session.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+test('SWEA waits for global completion and watches changed open files between calls', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'resharper-swea-'));
+  const project = join(root, 'App.csproj'), file = join(root, 'A.cs');
+  await writeFile(project, ''); await writeFile(file, 'fixed');
+  const executable = resolve('test/fake-backend.mjs');
+  const progress: string[] = [];
+  const session = new ReSharperSession(executable, project, 8000, root, { executable, args: ['--fake-swea'], cwd: root, swea: true }, message => progress.push(message));
+  try {
+    await session.start();
+    const started = Date.now();
+    assert.deepEqual(await session.diagnostics(file), []);
+    assert.ok(Date.now() - started >= 5000, 'File daemon completion cannot bypass pending SWEA work');
+    await writeFile(file, 'broken');
+    const deadline = Date.now() + 2000;
+    while ((session.status().swea?.completed ?? true) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    const state = await session.solutionDiagnostics();
+    assert.equal(state.issues[0].message, 'Dependent error', 'Watcher must synchronize the saved edit without another read_lint');
+    assert.ok(progress.some(message => message.includes('files pending')));
+    assert.ok(progress.includes('Solution-wide analysis complete'));
+  } finally { await session.close(); await rm(root, { recursive: true, force: true }); }
+});

@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { ensureBackend } from './installer.js';
 import { ProjectManager } from './projects.js';
+import type { ProgressListener } from './swea.js';
 
 const projects = new ProjectManager();
 const server = new McpServer({ name: 'resharper-mcp', version: '0.1.0' });
@@ -12,10 +13,17 @@ const result = async (operation: () => Promise<unknown>) => {
   try { return { content: [{ type: 'text' as const, text: JSON.stringify(await operation(), null, 2) }] }; }
   catch (error) { return { isError: true, content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }] }; }
 };
+function progress(extra: { _meta?: { progressToken?: string | number }; sendNotification: (notification: { method: 'notifications/progress'; params: { progressToken: string | number; progress: number; message: string } }) => Promise<void> }): ProgressListener {
+  const token = extra._meta?.progressToken;
+  let sequence = 0;
+  return message => {
+    if (token !== undefined) void extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, progress: ++sequence, message } }).catch(() => {});
+  };
+}
 server.registerTool('load_project', {
   description: 'Load a ReSharper solution/project and wait until loading finishes. Reuses the live session. Projects close after 30 minutes of inactivity.',
   inputSchema: { project },
-}, args => result(() => projects.load(args.project)));
+}, (args, extra) => result(() => projects.load(args.project, progress(extra))));
 server.registerTool('close_project', {
   description: 'Close a loaded project and terminate its ReSharper backend. An already closed project is a no-op.',
   inputSchema: { project },
@@ -24,7 +32,15 @@ server.registerTool('read_lint', {
   description: 'Read ReSharper diagnostics for a saved source file. Automatically loads the project and waits for diagnostics. Ranges use zero-based lines and UTF-16 character offsets; severity 1=error, 2=warning, 3=information, 4=hint.',
   inputSchema: { project, file: z.string().min(1).describe('Absolute file path, or a path relative to the solution/project directory.') },
   annotations: { readOnlyHint: true, destructiveHint: false },
-}, args => result(() => projects.diagnostics(args.project, args.file)));
+}, (args, extra) => result(() => projects.diagnostics(args.project, args.file, progress(extra))));
+server.registerTool('read_solution_lint', {
+  description: 'Wait for continuous solution-wide analysis and read its current errors and warnings, including unopened files. Requires RESHARPER_MCP_SWEA=1. Issue offsets are zero-based UTF-16 offsets from the start of the saved file.',
+  inputSchema: { project }, annotations: { readOnlyHint: true, destructiveHint: false },
+}, (args, extra) => result(() => projects.solutionDiagnostics(args.project, progress(extra))));
+server.registerTool('get_project_status', {
+  description: 'Read live analysis progress and the latest SWEA snapshot for an already loaded project. Returns immediately without waiting for analysis or loading a project.',
+  inputSchema: { project }, annotations: { readOnlyHint: true, destructiveHint: false },
+}, args => result(() => projects.status(args.project)));
 let stopping = false;
 async function shutdown() {
   if (stopping) return;
